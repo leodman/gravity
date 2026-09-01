@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import math
+import time
+from collections import deque
+
+import gradio as gr
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import gradio as gr
 
 
 def parse_vector(text):
@@ -29,7 +32,7 @@ def parse_xyz_rows(text, n):
     for row in rows:
         vals = [float(v) for v in row.replace(",", " ").split()]
         if len(vals) != 3:
-            raise ValueError("Each manual position/velocity row must contain x,y,z")
+            raise ValueError("Each manual position/velocity row must contain exactly 3 values")
         out.append(vals)
     return np.asarray(out, dtype=float)
 
@@ -74,7 +77,7 @@ def resolve_body_collisions(pos, vel, mass, radius):
 
 
 def reflect_box(pos, vel, half_size, radius):
-    limit = max(float(half_size) - max(radius, 0.0), 1e-12)
+    limit = max(float(half_size) - max(float(radius), 0.0), 1e-12)
     for i in range(len(pos)):
         for axis in range(3):
             while pos[i, axis] > limit or pos[i, axis] < -limit:
@@ -91,7 +94,8 @@ def diagnostics(pos, vel, mass, G, softening):
     potential = 0.0
     for i in range(len(mass)):
         for j in range(i + 1, len(mass)):
-            r = math.sqrt(float(np.dot(pos[j] - pos[i], pos[j] - pos[i]) + softening**2))
+            rij = pos[j] - pos[i]
+            r = math.sqrt(float(np.dot(rij, rij) + softening**2))
             potential -= G * mass[i] * mass[j] / r
     momentum = np.sum(mass[:, None] * vel, axis=0)
     com = np.sum(mass[:, None] * pos, axis=0) / np.sum(mass)
@@ -105,6 +109,7 @@ def initialize_system(n_s, n_o, mass_vector_text, heavy_mass, ordinary_mass,
     n = n_s + n_o
     if n < 1:
         raise ValueError("At least one body is required")
+
     names = [f"S{i}" for i in range(n_s)] + [f"O{i}" for i in range(n_o)]
     rng = np.random.default_rng(int(seed))
 
@@ -132,149 +137,227 @@ def initialize_system(n_s, n_o, mass_vector_text, heavy_mass, ordinary_mass,
             norm = np.linalg.norm(direction, axis=1)
             norm[norm == 0] = 1.0
             direction /= norm[:, None]
-            speed = rng.uniform(0, float(random_speed), size=n)
+            speed = rng.uniform(0.0, float(random_speed), size=n)
             vel = direction * speed[:, None]
         if n_s:
             vel[0] = 0.0
         if n_s == 1 and n_o == 1:
             vel[1] = 0.0
+
     return names, mass, pos, vel
 
 
 def marker_sizes(mass):
     lm = np.log10(np.maximum(mass, 1e-300))
     if np.allclose(lm.max(), lm.min()):
-        return np.full(len(mass), 10.0)
-    return 7.0 + 15.0 * (lm - lm.min()) / (lm.max() - lm.min())
+        return np.full(len(mass), 11.0)
+    return 8.0 + 18.0 * (lm - lm.min()) / (lm.max() - lm.min())
 
 
-def animation_figure(frames_pos, times, names, mass, n_s, limit, boundary_mode, box_half_size):
-    sizes = marker_sizes(mass)
-    groups = ["S" if i < n_s else "O" for i in range(len(names))]
+def live_figure(pos, trails, names, mass, n_s, limit, boundary_mode, box_half_size, sim_time):
+    fig = go.Figure()
 
-    def trace(frame):
-        custom = np.column_stack([mass, groups])
-        return go.Scatter(
-            x=frame[:, 0], y=frame[:, 1], mode="markers+text", text=names,
-            textposition="top center", marker=dict(size=sizes), customdata=custom,
-            hovertemplate="%{text}<br>x=%{x:.6g}<br>y=%{y:.6g}<br>mass=%{customdata[0]}<br>group=%{customdata[1]}<extra></extra>"
-        )
+    # Trails first, so objects stay visible above them.
+    for i, name in enumerate(names):
+        if trails and len(trails[i]) > 1:
+            arr = np.asarray(trails[i])
+            fig.add_trace(go.Scatter(
+                x=arr[:, 0], y=arr[:, 1], mode="lines",
+                line=dict(width=1), name=f"{name} trail",
+                showlegend=False, hoverinfo="skip", opacity=0.45,
+            ))
 
-    fig = go.Figure(data=[trace(frames_pos[0])])
-    fig.frames = [go.Frame(data=[trace(f)], name=str(k),
-                           layout=go.Layout(title_text=f"N-body gravity — t={times[k]:.6g}"))
-                  for k, f in enumerate(frames_pos)]
+    groups = np.array(["S" if i < n_s else "O" for i in range(len(names))], dtype=object)
+    custom = np.column_stack([mass, groups, pos[:, 2]])
+    fig.add_trace(go.Scatter(
+        x=pos[:, 0], y=pos[:, 1], mode="markers+text", text=names,
+        textposition="top center", marker=dict(size=marker_sizes(mass)),
+        customdata=custom,
+        hovertemplate=(
+            "%{text}<br>x=%{x:.6g}<br>y=%{y:.6g}<br>z=%{customdata[2]:.6g}"
+            "<br>mass=%{customdata[0]:.6g}<br>group=%{customdata[1]}<extra></extra>"
+        ),
+        name="Bodies",
+    ))
+
     shapes = []
     if boundary_mode == "Box":
         b = float(box_half_size)
         shapes.append(dict(type="rect", x0=-b, x1=b, y0=-b, y1=b, line=dict(width=2)))
+
     fig.update_layout(
-        title=f"N-body gravity — t={times[0]:.6g}", height=650, shapes=shapes,
+        title=f"Live N-body gravity — simulated time t = {sim_time:.6g}",
+        height=650,
+        shapes=shapes,
+        showlegend=False,
+        margin=dict(l=45, r=25, t=60, b=45),
         xaxis=dict(range=[-limit, limit], title="x", scaleanchor="y", scaleratio=1),
         yaxis=dict(range=[-limit, limit], title="y"),
-        updatemenus=[dict(type="buttons", showactive=False, buttons=[
-            dict(label="▶ Play", method="animate", args=[None, dict(frame=dict(duration=50, redraw=True), transition=dict(duration=0), fromcurrent=True)]),
-            dict(label="⏸ Pause", method="animate", args=[[None], dict(mode="immediate", frame=dict(duration=0, redraw=False))])
-        ])],
-        sliders=[dict(currentvalue=dict(prefix="time: "), steps=[
-            dict(method="animate", args=[[str(k)], dict(mode="immediate", frame=dict(duration=0, redraw=True), transition=dict(duration=0))], label=f"{times[k]:.3g}")
-            for k in range(len(frames_pos))
-        ])]
+        uirevision="gravity-live",
     )
     return fig
 
 
-def line_figure(df, columns, title, ytitle):
+def energy_figure(history):
+    df = pd.DataFrame(history)
     fig = go.Figure()
-    for col, label in columns:
-        fig.add_trace(go.Scatter(x=df["time"], y=df[col], name=label))
-    fig.update_layout(title=title, xaxis_title="time", yaxis_title=ytitle, height=420)
+    if not df.empty:
+        fig.add_trace(go.Scatter(x=df["time"], y=df["K"], name="Kinetic K"))
+        fig.add_trace(go.Scatter(x=df["time"], y=df["U"], name="Potential U"))
+        fig.add_trace(go.Scatter(x=df["time"], y=df["E"], name="Total E"))
+    fig.update_layout(title="Energy", xaxis_title="simulated time", yaxis_title="energy", height=380)
     return fig
 
 
-def simulate(n_s, n_o, steps, dt, G, heavy_mass, ordinary_mass, mass_vector_text,
-             init_extent, velocity_mode, random_speed, position_rows_text,
-             velocity_rows_text, collision_radius, softening, boundary_mode,
-             box_half_size, view_half_size, auto_view, record_every, seed):
+def momentum_figure(history):
+    df = pd.DataFrame(history)
+    fig = go.Figure()
+    if not df.empty:
+        for c in ["Px", "Py", "Pz", "Pmag"]:
+            fig.add_trace(go.Scatter(x=df["time"], y=df[c], name=("|P|" if c == "Pmag" else c)))
+    fig.update_layout(title="Total momentum", xaxis_title="simulated time", yaxis_title="momentum", height=380)
+    return fig
+
+
+def live_simulation(n_s, n_o, run_mode, step_limit, sim_duration, real_hours,
+                    dt, calculations_per_frame, frame_delay, G,
+                    heavy_mass, ordinary_mass, mass_vector_text,
+                    init_extent, velocity_mode, random_speed,
+                    position_rows_text, velocity_rows_text,
+                    collision_radius, softening, boundary_mode,
+                    box_half_size, view_half_size, auto_view,
+                    trail_points, diagnostic_points, seed):
+    """Generator: every yield updates the browser while integration continues."""
     try:
-        steps = int(steps)
         dt = float(dt)
         G = float(G)
-        record_every = max(1, int(record_every))
-        if steps < 1 or dt <= 0 or G <= 0:
-            raise ValueError("steps, dt and G must be positive")
+        if dt <= 0 or G <= 0:
+            raise ValueError("Δt and G must be > 0")
+
+        calculations_per_frame = max(1, int(calculations_per_frame))
+        step_limit = max(1, int(step_limit))
+        sim_duration = max(0.0, float(sim_duration))
+        real_hours = max(0.0, float(real_hours))
+        frame_delay = max(0.0, float(frame_delay))
+        trail_points = max(0, int(trail_points))
+        diagnostic_points = max(10, int(diagnostic_points))
 
         names, mass, pos, vel = initialize_system(
-            n_s, n_o, mass_vector_text, heavy_mass, ordinary_mass, init_extent,
-            velocity_mode, random_speed, position_rows_text, velocity_rows_text, seed
+            n_s, n_o, mass_vector_text, heavy_mass, ordinary_mass,
+            init_extent, velocity_mode, random_speed,
+            position_rows_text, velocity_rows_text, seed,
         )
-        initial_pos = pos.copy()
-        initial_vel = vel.copy()
-        frames_pos = [pos.copy()]
-        times = [0.0]
-        hist = []
-
-        def record(step):
-            ke, pe, te, p, com = diagnostics(pos, vel, mass, G, float(softening))
-            hist.append([step, step * dt, ke, pe, te, p[0], p[1], p[2], np.linalg.norm(p), com[0], com[1], com[2]])
-
-        record(0)
-        for step in range(1, steps + 1):
-            acc = gravitational_accelerations(pos, mass, G, float(softening))
-            vel += acc * dt                         # new velocity FIRST
-            pos += vel * dt                         # new position from new velocity
-            resolve_body_collisions(pos, vel, mass, float(collision_radius))
-            if boundary_mode == "Box":
-                reflect_box(pos, vel, float(box_half_size), float(collision_radius))
-            if step % record_every == 0 or step == steps:
-                frames_pos.append(pos.copy())
-                times.append(step * dt)
-                record(step)
-
-        df = pd.DataFrame(hist, columns=["step", "time", "kinetic_energy", "potential_energy", "total_energy", "Px", "Py", "Pz", "|P|", "COM_x", "COM_y", "COM_z"])
-        state = pd.DataFrame({
-            "name": names, "mass": mass,
-            "x": initial_pos[:, 0], "y": initial_pos[:, 1], "z": initial_pos[:, 2],
-            "vx": initial_vel[:, 0], "vy": initial_vel[:, 1], "vz": initial_vel[:, 2]
-        })
 
         if auto_view:
-            if boundary_mode == "Huge":
-                limit = max(float(init_extent), float(view_half_size), 1.0)
-            else:
-                limit = max(float(box_half_size), 1.0)
+            limit = max(float(box_half_size) if boundary_mode == "Box" else float(view_half_size),
+                        float(init_extent), 1.0)
         else:
-            limit = max(float(view_half_size), 1e-6)
+            limit = max(float(view_half_size), 1e-9)
 
-        sim_fig = animation_figure(frames_pos, times, names, mass, int(n_s), limit, boundary_mode, box_half_size)
-        e_fig = line_figure(df, [("kinetic_energy", "Kinetic K"), ("potential_energy", "Potential U"), ("total_energy", "Total E")], "Energy", "energy")
-        p_fig = line_figure(df, [("Px", "Px"), ("Py", "Py"), ("Pz", "Pz"), ("|P|", "|P|")], "Total momentum", "momentum")
+        trails = [deque(maxlen=trail_points or 1) for _ in names]
+        for i in range(len(names)):
+            trails[i].append(pos[i].copy())
 
-        e0, ef = df.iloc[0]["total_energy"], df.iloc[-1]["total_energy"]
-        drift = (ef - e0) / max(abs(e0), 1e-15)
-        status = f"Simulated {len(names)} bodies for {steps} steps; recorded {len(frames_pos)} frames. Relative energy drift={drift:+.3e}; final |P|={df.iloc[-1]['|P|']:.6g}."
-        return sim_fig, e_fig, p_fig, df, state, status
+        history = deque(maxlen=diagnostic_points)
+        initial_state = pd.DataFrame({
+            "name": names, "mass": mass,
+            "x": pos[:, 0], "y": pos[:, 1], "z": pos[:, 2],
+            "vx": vel[:, 0], "vy": vel[:, 1], "vz": vel[:, 2],
+        })
+
+        step = 0
+        sim_time = 0.0
+        wall_start = time.monotonic()
+
+        ke, pe, te, p, com = diagnostics(pos, vel, mass, G, float(softening))
+        e0 = te
+        history.append({"step": step, "time": sim_time, "K": ke, "U": pe, "E": te,
+                        "Px": p[0], "Py": p[1], "Pz": p[2], "Pmag": np.linalg.norm(p)})
+
+        status = "Running — press Stop to end a Continuous or long-duration run."
+        yield (live_figure(pos, trails if trail_points else None, names, mass, int(n_s), limit,
+                           boundary_mode, box_half_size, sim_time),
+               energy_figure(history), momentum_figure(history),
+               pd.DataFrame(history), initial_state, status)
+
+        while True:
+            # Stop criteria are evaluated before each visible batch.
+            elapsed_wall = time.monotonic() - wall_start
+            if run_mode == "Fixed steps" and step >= step_limit:
+                break
+            if run_mode == "Simulated duration" and sim_time >= sim_duration:
+                break
+            if run_mode == "Real-time hours" and elapsed_wall >= real_hours * 3600.0:
+                break
+            # Continuous has no automatic termination.
+
+            batch = calculations_per_frame
+            if run_mode == "Fixed steps":
+                batch = min(batch, step_limit - step)
+            elif run_mode == "Simulated duration" and dt > 0:
+                remaining = max(0.0, sim_duration - sim_time)
+                batch = min(batch, max(1, int(math.ceil(remaining / dt))))
+
+            for _ in range(batch):
+                acc = gravitational_accelerations(pos, mass, G, float(softening))
+                vel += acc * dt                 # 1) NEW VELOCITY FIRST
+                pos += vel * dt                 # 2) POSITION FROM NEW VELOCITY
+                resolve_body_collisions(pos, vel, mass, float(collision_radius))
+                if boundary_mode == "Box":
+                    reflect_box(pos, vel, float(box_half_size), float(collision_radius))
+                step += 1
+                sim_time += dt
+
+            for i in range(len(names)):
+                trails[i].append(pos[i].copy())
+
+            ke, pe, te, p, com = diagnostics(pos, vel, mass, G, float(softening))
+            history.append({"step": step, "time": sim_time, "K": ke, "U": pe, "E": te,
+                            "Px": p[0], "Py": p[1], "Pz": p[2], "Pmag": np.linalg.norm(p)})
+
+            drift = (te - e0) / max(abs(e0), 1e-15)
+            elapsed_wall = time.monotonic() - wall_start
+            status = (f"RUNNING | step={step:,} | simulated t={sim_time:.6g} | "
+                      f"wall={elapsed_wall:.1f}s | ΔE/E0={drift:+.3e} | |P|={np.linalg.norm(p):.6g}")
+
+            yield (live_figure(pos, trails if trail_points else None, names, mass, int(n_s), limit,
+                               boundary_mode, box_half_size, sim_time),
+                   energy_figure(history), momentum_figure(history),
+                   pd.DataFrame(history), initial_state, status)
+
+            if frame_delay > 0:
+                time.sleep(frame_delay)
+
+        elapsed_wall = time.monotonic() - wall_start
+        drift = (te - e0) / max(abs(e0), 1e-15)
+        status = (f"FINISHED | step={step:,} | simulated t={sim_time:.6g} | "
+                  f"wall={elapsed_wall:.1f}s | ΔE/E0={drift:+.3e} | |P|={np.linalg.norm(p):.6g}")
+        yield (live_figure(pos, trails if trail_points else None, names, mass, int(n_s), limit,
+                           boundary_mode, box_half_size, sim_time),
+               energy_figure(history), momentum_figure(history),
+               pd.DataFrame(history), initial_state, status)
+
     except Exception as exc:
         empty = go.Figure()
-        return empty, empty, empty, pd.DataFrame(), pd.DataFrame(), f"ERROR: {exc}"
+        yield empty, empty, empty, pd.DataFrame(), pd.DataFrame(), f"ERROR: {exc}"
 
 
 DESCRIPTION = """
-# Gravity — Planetary / N-body Simulator
+# Gravity — Live Planetary / N-body Simulator
 
-Classical Newtonian N-body simulation with 3-D vectors and an animated XY view.
+The simulation now **evolves visibly while it is being calculated**.
 
 Integrator: **symplectic Euler / kick-drift**
 
-`v(n+1) = v(n) + a(n) Δt`
-
+`v(n+1) = v(n) + a(n) Δt`  
 `x(n+1) = x(n) + v(n+1) Δt`
 
-The velocity is deliberately computed first, then the new position.
+Choose **Continuous** to run indefinitely until you press **Stop**, or choose a fixed number of steps, a simulated duration, or a number of real-world hours.
 """
 
-with gr.Blocks(title="Gravity — Planetary Simulation") as demo:
+with gr.Blocks(title="Gravity — Live Planetary Simulation") as demo:
     gr.Markdown(DESCRIPTION)
+
     with gr.Row():
         with gr.Column():
             gr.Markdown("## Objects")
@@ -283,30 +366,50 @@ with gr.Blocks(title="Gravity — Planetary Simulation") as demo:
             heavy_mass = gr.Number(value=1000.0, label="Default S mass")
             ordinary_mass = gr.Number(value=1.0, label="Default O mass")
             mass_vector = gr.Textbox(label="Optional mass vector", placeholder="1000, 500, 1")
+
             gr.Markdown("## Initial state")
             init_extent = gr.Number(value=10.0, label="Random position half-extent")
             velocity_mode = gr.Radio(["Zero", "Random"], value="Zero", label="Generated initial velocities")
             random_speed = gr.Number(value=0.2, label="Maximum random speed magnitude")
             seed = gr.Number(value=1, precision=0, label="Random seed")
-            position_rows = gr.Textbox(label="Optional manual positions: one x,y,z row per body", placeholder="0,0,0\n7,0,0", lines=5)
-            velocity_rows = gr.Textbox(label="Optional manual velocities: one vx,vy,vz row per body", placeholder="0,0,0\n0,3,0", lines=5)
+            position_rows = gr.Textbox(label="Optional manual positions: x,y,z per body",
+                                       placeholder="0,0,0\n7,0,0", lines=5)
+            velocity_rows = gr.Textbox(label="Optional manual velocities: vx,vy,vz per body",
+                                       placeholder="0,0,0\n0,3,0", lines=5)
+
         with gr.Column():
-            gr.Markdown("## Physics")
+            gr.Markdown("## Run control")
+            run_mode = gr.Radio(
+                ["Continuous", "Fixed steps", "Simulated duration", "Real-time hours"],
+                value="Continuous", label="Run mode")
+            step_limit = gr.Number(value=100000, precision=0, label="Steps (Fixed steps mode)")
+            sim_duration = gr.Number(value=100.0, label="Simulated time (Simulated duration mode)")
+            real_hours = gr.Number(value=1.0, label="Real hours to run (Real-time hours mode)")
+
+            gr.Markdown("## Physics / live refresh")
             G = gr.Number(value=1.0, label="Gravitational constant G")
-            dt = gr.Number(value=0.001, label="Δt")
-            steps = gr.Number(value=5000, precision=0, label="Integration steps")
+            dt = gr.Number(value=0.001, label="Physics Δt")
+            calculations_per_frame = gr.Number(value=20, precision=0,
+                                                label="Physics steps per screen refresh")
+            frame_delay = gr.Number(value=0.03, label="Delay between screen refreshes (seconds)")
             collision_radius = gr.Number(value=0.05, label="Effective collision radius")
             softening = gr.Number(value=1e-6, label="Gravity softening ε")
+
             gr.Markdown("## Boundary / view")
             boundary_mode = gr.Radio(["Huge", "Box"], value="Huge", label="Boundary mode")
             box_half_size = gr.Number(value=12.0, label="Box half-size")
             view_half_size = gr.Number(value=12.0, label="Visible XY half-size")
-            auto_view = gr.Checkbox(value=True, label="Automatic visible-window size")
-            record_every = gr.Number(value=20, precision=0, label="Record every N steps")
-            run_btn = gr.Button("Run simulation", variant="primary")
+            auto_view = gr.Checkbox(value=True, label="Automatic initial view size")
+            trail_points = gr.Number(value=150, precision=0, label="Trail points per object (0 = off)")
+            diagnostic_points = gr.Number(value=500, precision=0, label="Diagnostic history points kept")
+
+    with gr.Row():
+        start_btn = gr.Button("▶ Start / Restart", variant="primary")
+        stop_btn = gr.Button("■ Stop", variant="stop")
 
     status = gr.Textbox(label="Simulation status", interactive=False)
-    with gr.Tab("Simulation"):
+
+    with gr.Tab("Live simulation"):
         sim_plot = gr.Plot()
     with gr.Tab("Energy"):
         energy_plot = gr.Plot()
@@ -317,14 +420,28 @@ with gr.Blocks(title="Gravity — Planetary Simulation") as demo:
     with gr.Tab("Initial state"):
         state_table = gr.Dataframe(interactive=False)
 
-    run_btn.click(
-        simulate,
-        inputs=[n_s, n_o, steps, dt, G, heavy_mass, ordinary_mass, mass_vector,
-                init_extent, velocity_mode, random_speed, position_rows, velocity_rows,
-                collision_radius, softening, boundary_mode, box_half_size,
-                view_half_size, auto_view, record_every, seed],
-        outputs=[sim_plot, energy_plot, momentum_plot, diagnostics_table, state_table, status]
+    inputs = [
+        n_s, n_o, run_mode, step_limit, sim_duration, real_hours,
+        dt, calculations_per_frame, frame_delay, G,
+        heavy_mass, ordinary_mass, mass_vector,
+        init_extent, velocity_mode, random_speed,
+        position_rows, velocity_rows,
+        collision_radius, softening, boundary_mode,
+        box_half_size, view_half_size, auto_view,
+        trail_points, diagnostic_points, seed,
+    ]
+    outputs = [sim_plot, energy_plot, momentum_plot, diagnostics_table, state_table, status]
+
+    run_event = start_btn.click(
+        fn=live_simulation,
+        inputs=inputs,
+        outputs=outputs,
+        concurrency_limit=1,
+        show_progress="hidden",
     )
 
+    # Gradio cancellation interrupts a Continuous/long generator immediately.
+    stop_btn.click(fn=None, inputs=None, outputs=None, cancels=[run_event], queue=False)
+
 if __name__ == "__main__":
-    demo.launch(share=True)
+    demo.queue().launch(share=True)
