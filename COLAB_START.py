@@ -2,4 +2,4 @@
 # Run after cloning https://github.com/leodman/gravity
 
 !pip install -q -r requirements.txt
-!python planetary_sim.py
+!python run_gravity.py
