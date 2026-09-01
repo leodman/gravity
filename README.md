@@ -1,200 +1,154 @@
 # Gravity — Planetary / N-body Simulation
 
-Interactive Newtonian N-body gravity simulator written in Python with a Gradio web UI. The same project can run in Google Colab, a normal Python environment, or a Conda/Jupyter setup.
+Interactive Newtonian N-body gravity simulator with a Gradio web UI. It runs in Google Colab, standard Python, or Conda/Jupyter.
 
 Repository: `https://github.com/leodman/gravity`
 
-## Current physics model
+## Recommended launcher
 
-For every body `i`, the simulator computes all pairwise Newtonian gravitational interactions:
+Use:
 
-`F_ij = G m_i m_j (r_j-r_i) / |r_j-r_i|^3`
+```bash
+python run_gravity.py
+```
 
-The total acceleration is obtained from the sum of all pairwise forces.
+The current app is implemented in `gravity_app.py` and reuses the proven base code in `planetary_sim.py`.
 
-The integration order is intentionally:
+## Physics integration
 
-`v_i(n+1) = v_i(n) + a_i(n) dt`
+For every body, pairwise Newtonian gravity is calculated and summed. The integration order is intentionally:
 
-then
+`v(n+1) = v(n) + a(n) dt`
 
-`x_i(n+1) = x_i(n) + v_i(n+1) dt`
+then:
 
-This is symplectic Euler / kick-drift: velocity is updated first, then position is advanced using the new velocity.
+`x(n+1) = x(n) + v(n+1) dt`
 
-The selected outer `dt` can be subdivided into many internal physics substeps. The default is 100 internal substeps per outer step. Increasing this improves close-encounter and energy accuracy at the cost of computation time.
+This is symplectic Euler / kick-drift: velocity first, position second.
 
-## Object groups
+The user-selected outer `dt` is subdivided into configurable internal physics substeps. The default is 100. More substeps improve close-encounter and energy accuracy at the cost of CPU time.
+
+## Objects
 
 Bodies are named:
 
-- `S0`, `S1`, ... for heavy / star-like bodies.
-- `O0`, `O1`, ... for ordinary bodies.
+- `S0`, `S1`, ... for heavy/star-like objects.
+- `O0`, `O1`, ... for ordinary objects.
 
-Default system:
+Default masses are `S = 1000` and `O = 1`, but arbitrary positive mass vectors may be supplied.
 
-- `S = 1`
-- `O = 1`
-- default `mass(S) = 1000`
-- default `mass(O) = 1`
-- `S0` starts at `(0,0,0)` with zero velocity.
-- in the default two-body case, `O0` also starts with zero velocity unless manually overridden.
+Each body also has a physical radius. Default S/O radii or an explicit radius vector may be used.
 
-Masses may be supplied through an arbitrary positive mass vector, so the S/O labels do not impose any physical mass relationship.
+## Spherical elastic collisions
 
-## Physical radii and spherical collisions
+Bodies are rigid, smooth spheres for contact purposes.
 
-Bodies are treated as spherical rigid objects for collision purposes while their gravitational field is computed from their center of mass.
+Two bodies contact when:
 
-Each body has a physical radius `R_i`. You can use default radii for S and O bodies or provide an explicit radius vector.
+`distance = R_i + R_j`
 
-Two bodies contact when their center-to-center distance reaches:
-
-`d = R_i + R_j`
-
-The simulator uses perfectly elastic, frictionless sphere collisions:
+Collisions are perfectly elastic and frictionless:
 
 - coefficient of restitution `e = 1`
-- impulse acts along the center-to-center normal at contact
+- impulse acts along the contact normal / center-to-center line
 - tangential relative velocity is unchanged
-- off-center collisions naturally produce ricochets
-- linear momentum is transferred between bodies but conserved for the system
-- kinetic energy is transferred between bodies but conserved across the instantaneous collision, apart from numerical error
+- off-center impacts naturally ricochet
+- kinetic energy and momentum transfer between bodies
+- total kinetic energy and total linear momentum are conserved across the instantaneous collision up to numerical error
 
-The program searches for the actual contact time inside each drift interval so a fast-moving body cannot simply jump through another sphere between two sampled positions.
+The code searches for contact inside each drift interval so fast bodies do not simply tunnel through one another between sampled positions.
 
-## Gravity and energy
+## Energy
 
-During ordinary gravitational motion, kinetic and gravitational potential energy exchange:
+The diagnostics show:
 
-`K <-> U`
+- kinetic energy `K`
+- gravitational potential energy `U`
+- total mechanical energy `E = K + U`
+- initial `K0`, `U0`, `E0`
+- relative energy error `(E-E0)/|E0|`
 
-where
+For a well-resolved isolated run, total mechanical energy should remain approximately constant. Large monotonic energy drift means the numerical resolution is too coarse.
 
-`K = sum(1/2 m_i |v_i|^2)`
+## Momentum
 
-and
+The simulator tracks `Px`, `Py`, `Pz`, and `|P|`.
 
-`U = -sum_{i<j}(G m_i m_j / r_ij)`
-
-Total mechanical energy is:
-
-`E = K + U`
-
-For the ideal Newtonian system with elastic collisions, total mechanical energy is conserved. In the numerical simulation, `E` should remain approximately constant; any drift is numerical error.
-
-The UI explicitly shows the initial values `K0`, `U0`, and `E0`, and plots the relative energy error:
-
-`(E - E0) / |E0|`
-
-This should remain close to zero in a well-resolved run.
-
-## Momentum and center of mass
-
-The simulator tracks the total vector momentum:
-
-`P = sum(m_i v_i)`
-
-and displays:
-
-- `Px`
-- `Py`
-- `Pz`
-- `|P|`
-
-It also records the center of mass coordinates.
-
-In Huge mode, total momentum should remain approximately constant except for numerical error. In Box mode, wall collisions transfer momentum between the simulated bodies and the external box, so body-system momentum alone is not expected to remain constant through wall impacts.
-
-## Initial conditions
-
-Positions may be:
-
-- randomly generated
-- entered manually as `x,y,z` rows
-
-Velocities may be:
-
-- zero
-- random vectors
-- entered manually as `vx,vy,vz` rows
-
-The internal simulation state is always three-dimensional. The current live visualization is an XY projection.
+In Huge mode momentum should remain approximately constant. In Box mode the walls apply external impulses to the body system, so body-system momentum changes during wall impacts.
 
 ## Boundary modes
 
 ### Huge
 
-The visible plotting window is only a camera. A body can leave the visible region and still remains fully part of the gravitational calculation.
-
-This is useful for studying whether bodies escape, the system diverges, or the system remains bounded.
+Unbounded 3-D system. The displayed XY window is only a camera. Bodies may leave it while remaining fully active in the calculation.
 
 ### Box
 
-The simulator uses a cubic reflecting boundary. Spherical bodies bounce elastically from the walls, with the body center constrained by its own physical radius.
+A 3-D reflecting box. Bodies bounce elastically from the walls.
+
+### Toroid
+
+A **2-D periodic XY universe** represented by the same square display.
+
+If the Toroid half-size is `L`, the visible universe is `[-L,+L)` in X and Y. A body crossing one edge re-enters from the opposite edge with unchanged velocity.
+
+Toroid mode deliberately disables the third dimension:
+
+`z = vz = az = 0`
+
+Gravity uses only the **shortest periodic link** between each pair of bodies (minimum-image convention). If the full width is `W = 2L`:
+
+`dx = dx - W * round(dx/W)`
+
+and similarly for Y.
+
+The code deliberately does **not** add gravitational forces from the infinite set of farther periodic copies.
+
+Collisions use the same periodic geometry, so two bodies near opposite edges can attract and collide across that edge.
+
+Toroid potential energy uses the same minimum-image pair distance as the force calculation.
+
+A normal Cartesian center of mass is not globally meaningful on a periodic torus, so Toroid COM X/Y should not be interpreted as ordinary physical COM coordinates.
 
 ## Run modes
 
-The simulator can run in four ways:
+- `Continuous` — runs until Stop.
+- `Fixed steps` — stops after a selected number of outer steps.
+- `Simulated duration` — stops at a selected simulation time.
+- `Real-time hours` — computes for a selected amount of wall-clock time.
 
-- `Continuous` — evolves until the user presses Stop.
-- `Fixed steps` — stops after a selected number of outer integration steps.
-- `Simulated duration` — stops when the physics clock reaches a selected simulated time.
-- `Real-time hours` — continues computing for a selected amount of wall-clock time.
-
-`Physics steps per screen refresh` controls how many outer physics steps are calculated before the browser is updated.
-
-`Delay between screen refreshes` can be used to control animation pacing.
+`Physics steps per screen refresh` controls how much physics is calculated between browser updates.
 
 ## Trail modes
 
-The live XY display has three trajectory modes.
-
 ### Fading
 
-Default mode. A rolling deque keeps only the most recent trail points. Old trail segments disappear automatically.
-
-This is useful for seeing current motion without filling the screen permanently.
+Default rolling trail. Only recent points are kept and old segments disappear.
 
 ### Permanent
 
-Permanent mode uses a fixed-size XY raster trail layer instead of storing an ever-growing list of coordinates.
-
-This is intended for long stability and chaos experiments.
+Fixed-memory XY raster intended for long stability/chaos experiments.
 
 Controls include:
 
-- permanent trail visibility
-- trail opacity
+- visible / hidden
+- opacity
 - raster resolution
-- decimation / record-every-N-refreshes
+- record every N screen refreshes
 
-The raster is updated from decimated screen-refresh positions, not from every internal physics substep. Successive sampled positions are connected so the accumulated path still looks continuous.
+The full raster stays in memory at fixed size, while only a downsampled preview is sent to Plotly. This prevents Permanent mode from overwhelming the Energy and Momentum plot updates.
 
-Because the permanent trail is stored as a fixed-resolution raster, memory use does not increase with simulation duration.
+Repeated visits accumulate in the raster, making frequently occupied regions stronger.
 
-Repeated visits to the same spatial region accumulate on the raster, which can make frequently occupied trajectories or chaotic regions visually stronger.
+In Toroid mode, trails break at an edge and continue on the antipodal edge; they do not draw a false diagonal line across the whole universe.
 
 ### None
 
-No trajectory history is stored or displayed.
+No trail history is maintained.
 
-## Diagnostics tabs
+## Useful radial sanity test
 
-The web UI currently includes:
-
-- Live simulation
-- Energy
-- Relative energy error
-- Momentum
-- Diagnostics table
-- Initial state table
-
-Status output includes current step, simulated time, wall time, K, U, E, relative energy error, total momentum magnitude, and collision count.
-
-## Recommended radial collision sanity test
-
-A useful two-body verification is:
+Use:
 
 - `S0 mass = 1000`
 - `O0 mass = 1`
@@ -215,32 +169,30 @@ A useful two-body verification is:
 ```
 
 - `dt = 0.001`
-- `internal substeps = 100`
+- internal substeps `= 100`
 
-Expected behavior: O0 falls approximately radially toward S0, contacts it at center separation `0.6`, bounces elastically, and climbs back toward approximately its original distance. S0 recoils slightly because its mass is finite rather than infinite.
+Expected behavior: O0 falls radially toward S0, contacts it at separation `0.6`, bounces elastically, and climbs back near its original turning point. Increasing internal substeps should improve return-point and energy accuracy.
 
-The exact return point depends on numerical resolution. Increasing internal substeps should reduce the energy error and improve the return-point accuracy.
+## Google Colab
 
-## Run in Google Colab
+Fresh clone:
 
 ```python
 !git clone https://github.com/leodman/gravity.git
 %cd gravity
 !pip install -r requirements.txt
-!python planetary_sim.py
+!python run_gravity.py
 ```
 
-For an existing clone:
+Existing clone:
 
 ```python
 %cd /content/gravity
 !git pull
-!python planetary_sim.py
+!python run_gravity.py
 ```
 
-Gradio will provide a browser link.
-
-## Run with Conda
+## Conda / local Python
 
 ```bash
 git clone https://github.com/leodman/gravity.git
@@ -248,58 +200,29 @@ cd gravity
 conda create -n gravity python=3.11
 conda activate gravity
 pip install -r requirements.txt
-python planetary_sim.py
+python run_gravity.py
 ```
 
-The same Gradio interface will open locally.
+For long experiments, a local Conda machine is often preferable to a temporary Colab runtime.
 
-## Run from Jupyter
+## Jupyter
 
-After installing the dependencies and entering the repository directory:
+From the repository directory after installing dependencies:
 
 ```python
-%run planetary_sim.py
+%run run_gravity.py
 ```
 
-A Conda/local runtime is a good choice for very long experiments because it is not dependent on a temporary Colab session remaining alive.
+## Current research goal
 
-## Numerical interpretation
-
-The physical laws being modeled conserve total energy and momentum for an isolated system, but the simulator is discrete and finite precision.
-
-Important controls:
-
-- smaller outer `dt` generally improves accuracy
-- more internal substeps improve close-encounter resolution
-- very close approaches create strong gravitational accelerations and require greater numerical resolution
-- gravity softening prevents numerical singular behavior at almost-zero separation, although spherical contact normally prevents physical overlap before reaching zero distance
-- large long-term energy drift is a warning that the numerical resolution is insufficient
-
-The relative-energy-error graph is the primary numerical health check.
-
-## Current project goal
-
-The immediate purpose is to experiment with small and medium N-body systems and observe whether they:
+Use the simulator to explore systems that may:
 
 - remain stable
 - remain bounded but become chaotic
 - repeatedly collide and ricochet
-- exchange energy and momentum between bodies
-- eject one or more bodies
-- diverge spatially over long times
+- redistribute energy and momentum
+- eject bodies
+- diverge spatially
+- develop periodic or complicated structures in the 2-D Toroid universe
 
-The permanent raster trail is specifically intended to make long-term bounded/chaotic structure visible without unbounded memory growth.
-
-## Possible next additions
-
-Useful future extensions include:
-
-- system spatial extent versus time, such as `Rmax(t)` relative to the center of mass
-- historical maximum system extent
-- angular momentum diagnostics
-- 3-D interactive visualization
-- selectable higher-order or leapfrog/Verlet integrators for comparison
-- automated stability/escape detection
-- presets for binary systems, three-body systems, circular orbits, slingshots, and random clusters
-- saving/loading full experiment configurations
-- exporting diagnostics and final state for later analysis
+See `PROJECT_STATUS.md` for the current handoff and next-development ideas.
