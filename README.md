@@ -6,13 +6,21 @@ Repository: `https://github.com/leodman/gravity`
 
 ## Recommended launcher
 
-Use:
+Always start the current application with:
 
 ```bash
 python run_gravity.py
 ```
 
 The current app is implemented in `gravity_app.py` and reuses the proven base code in `planetary_sim.py`.
+
+When the current application is running, the **Boundary mode** control must show:
+
+- `Huge`
+- `Box`
+- `Toroid`
+
+If Toroid does not appear, you are almost certainly looking at an older Gradio process or an old browser link. Pull the repository, stop the old Python/Gradio processes, start `run_gravity.py` again, and open the **new** Gradio URL printed by that launch.
 
 ## Physics integration
 
@@ -75,6 +83,8 @@ For a well-resolved isolated run, total mechanical energy should remain approxim
 The simulator tracks `Px`, `Py`, `Pz`, and `|P|`.
 
 In Huge mode momentum should remain approximately constant. In Box mode the walls apply external impulses to the body system, so body-system momentum changes during wall impacts.
+
+In Toroid mode the system is strictly two-dimensional, so `Pz = 0` by construction.
 
 ## Boundary modes
 
@@ -184,13 +194,20 @@ Fresh clone:
 !python run_gravity.py
 ```
 
-Existing clone:
+Existing clone — recommended clean restart:
 
 ```python
 %cd /content/gravity
 !git pull
+!pkill -f "python.*run_gravity.py" || true
+!pkill -f "python.*planetary_sim.py" || true
+!pkill -f "python.*gravity_app.py" || true
 !python run_gravity.py
 ```
+
+Then open the **new Gradio URL printed by the final command**. Do not reuse an older Gradio browser tab or share URL after a code update.
+
+A quick visual version check is simple: the Boundary mode selector must show `Huge`, `Box`, and `Toroid`.
 
 ## Conda / local Python
 
@@ -205,6 +222,8 @@ python run_gravity.py
 
 For long experiments, a local Conda machine is often preferable to a temporary Colab runtime.
 
+After pulling code updates locally, stop the old `run_gravity.py` process and launch it again. A running Gradio process does not automatically reload the new Python source.
+
 ## Jupyter
 
 From the repository directory after installing dependencies:
@@ -212,6 +231,8 @@ From the repository directory after installing dependencies:
 ```python
 %run run_gravity.py
 ```
+
+If a previous notebook cell is still running the server, interrupt that kernel execution before launching the updated version.
 
 ## Current research goal
 
