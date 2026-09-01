@@ -185,23 +185,34 @@ Expected behavior: O0 falls radially toward S0, contacts it at separation `0.6`,
 
 ## Google Colab
 
-Fresh clone:
+### Recommended startup — works regardless of the notebook's current directory
+
+Use this exact block:
 
 ```python
-!git clone https://github.com/leodman/gravity.git
-%cd gravity
-!pip install -r requirements.txt
+%cd /content
+
+import os
+if not os.path.isdir('/content/gravity/.git'):
+    !git clone https://github.com/leodman/gravity.git /content/gravity
+else:
+    !git -C /content/gravity pull
+
+%cd /content/gravity
+!pip install -q -r requirements.txt
 !python run_gravity.py
 ```
 
-Existing clone — recommended clean restart:
+Using the absolute path `/content/gravity` is intentional. Colab remembers the notebook's current working directory between cells. If you run `%cd gravity` while you are already in `/content/gravity`, Colab moves to `/content/gravity/gravity`, and `run_gravity.py` will not be found there.
+
+### Clean restart after a code update
 
 ```python
-%cd /content/gravity
-!git pull
 !pkill -f "python.*run_gravity.py" || true
 !pkill -f "python.*planetary_sim.py" || true
 !pkill -f "python.*gravity_app.py" || true
+!git -C /content/gravity pull
+%cd /content/gravity
 !python run_gravity.py
 ```
 
