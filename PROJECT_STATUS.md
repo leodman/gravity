@@ -2,125 +2,145 @@
 
 Last updated: 2026-09-01
 
-This file is a compact handoff for continuing development later.
+This is the handoff file for resuming development later.
+
+## Recommended executable
+
+Run:
+
+`python run_gravity.py`
+
+`run_gravity.py` launches the current application in `gravity_app.py`.
+
+The older `planetary_sim.py` remains the base implementation reused by the current app.
 
 ## What currently works
 
 - Live Newtonian N-body gravity simulation in a Gradio web UI.
-- 3-D internal vectors with XY visualization.
 - S and O object groups with arbitrary positive mass vectors.
 - Physical spherical radii with optional radius vector.
 - Perfectly elastic, frictionless sphere-sphere collisions.
 - Off-center impacts ricochet naturally.
-- Collision-time search inside each drift interval to prevent tunneling.
-- Symplectic Euler / kick-drift integration: update velocity first, then position.
-- Configurable outer `dt` plus configurable internal physics substeps.
-- Huge and Box boundary modes.
+- Collision-time search inside drift intervals to prevent tunneling.
+- Symplectic Euler / kick-drift: velocity first, position second.
+- Configurable outer `dt` and internal substeps.
+- Three boundary modes: Huge, Box, Toroid.
 - Continuous, fixed-step, simulated-duration, and real-time-hour run modes.
-- Start/Restart and Stop controls.
-- Live kinetic, potential, and total energy diagnostics.
-- Explicit initial K0, U0, E0 values.
-- Relative energy error `(E-E0)/|E0|` graph.
-- Total vector momentum and momentum magnitude.
-- Center-of-mass diagnostics.
-- Collision counter.
-- Fading trail mode.
-- Permanent fixed-memory raster trail mode with decimation, opacity, visibility, and selectable raster resolution.
-- No-trail mode.
-- Google Colab operation.
-- Local/Conda/Jupyter operation.
+- Live kinetic, potential, total-energy, energy-error, and momentum plots.
+- Collision counter and diagnostics table.
+- Fading, Permanent, and None trail modes.
+- Permanent trail uses fixed-memory raster storage with a decimated browser preview so Energy/Momentum plots remain responsive.
+- Google Colab and local Conda/Jupyter operation.
 
-## Agreed physical assumptions
+## Boundary modes
 
-1. Newtonian gravity between all body centers.
-2. Bodies are rigid spheres for contact/collision purposes.
-3. No deformation.
-4. No friction at contact.
-5. No spin/rotation is currently modeled.
-6. Coefficient of restitution is 1: collisions are perfectly elastic.
-7. Collision impulse is normal to the two surfaces, along the center-to-center line at contact.
-8. Tangential velocity is unchanged by the collision impulse.
-9. Individual kinetic energies and momenta may change during collision, while total kinetic energy and total linear momentum are conserved for an isolated collision up to numerical error.
-10. Under gravity, kinetic and potential energy exchange while total mechanical energy should remain approximately constant numerically.
+### Huge
 
-## Important numerical behavior
+Unbounded 3-D Newtonian system. The XY window is only a camera; bodies may leave the visible region and continue interacting.
 
-The physics is conservative, but the numerical integration is approximate.
+### Box
 
-- Outer `dt` is the user-visible simulation step.
-- Each outer step is divided into `internal_substeps`.
-- Default internal substeps: 100.
-- Higher substep counts improve close-encounter and energy behavior but consume more CPU.
-- Relative energy error should stay close to zero.
-- Large monotonic energy error means the selected numerical resolution is too coarse.
+3-D reflecting box. Spherical bodies bounce elastically from the walls. Wall impulses mean body-system momentum alone is not conserved through wall collisions.
 
-A known good radial sanity test is described in README.md.
+### Toroid
 
-## Trail behavior
+A square **2-D periodic XY universe**.
+
+- The displayed square represents coordinates `[-L,+L)` in X and Y, where `L = Box / Toroid half-size`.
+- A body leaving one edge immediately re-enters from the opposite edge with unchanged velocity.
+- Toroid is deliberately 2-D: `z = vz = az = 0`.
+- Pair gravity uses the shortest periodic displacement only (minimum-image convention).
+- The simulator does **not** sum gravity from an infinite lattice of periodic copies.
+- Sphere-sphere collision detection and collision normals also use periodic geometry, so bodies can collide across opposite edges.
+- Fading and Permanent trails break at a periodic edge and continue from the antipodal edge; they do not draw a false line across the screen.
+
+For width `W = 2L`, the shortest X displacement is conceptually:
+
+`dx = dx - W * round(dx/W)`
+
+and similarly for Y.
+
+Toroid potential energy diagnostics use the same minimum-image pair distance as the force calculation.
+
+A simple Cartesian center of mass is not globally meaningful on a periodic torus, so Toroid COM X/Y diagnostics are intentionally not treated as physical COM coordinates.
+
+## Agreed collision model
+
+1. Bodies are rigid spheres for contact purposes.
+2. No deformation, friction, or spin.
+3. Coefficient of restitution `e = 1`.
+4. Collision impulse acts along the contact normal / center-to-center line.
+5. Tangential relative velocity is unchanged.
+6. Individual bodies exchange kinetic energy and momentum.
+7. Total kinetic energy and total linear momentum are conserved across an isolated elastic collision up to numerical error.
+8. Under gravity, K and U exchange while total mechanical energy should remain approximately constant numerically.
+
+## Numerical behavior
+
+- Outer `dt` is the user-visible time step.
+- Each outer step is divided into `internal_substeps`; default is 100.
+- Higher substep counts improve close-approach and energy behavior but cost CPU time.
+- Relative energy error `(E-E0)/|E0|` is the main health check.
+- Large monotonic energy drift means the numerical resolution is too coarse.
+
+## Trails
 
 ### Fading
 
-Uses a bounded recent-history deque and automatically erases old path segments.
+Bounded recent-history deque. Old path segments disappear.
 
 ### Permanent
 
-Uses a fixed-resolution raster layer instead of an unbounded point list.
+Fixed-resolution XY raster. Runtime memory does not grow with trajectory length.
 
-The permanent layer is updated only every selected N browser refreshes and connects sampled positions. Memory use therefore stays bounded over long runs.
-
-It is intended for experiments where the simulation may be left running long enough to reveal stable, bounded-chaotic, or divergent behavior.
+- Configurable raster resolution.
+- Configurable record-every-N-refreshes decimation.
+- Configurable opacity and visibility.
+- Browser preview is downsampled independently from the full internal raster to keep live diagnostic plots responsive.
 
 ### None
 
-No trail data is maintained.
+No trail history.
 
 ## Primary research direction
 
-Use the simulator to explore long-term behavior of gravitational many-body systems with elastic physical collisions:
+Use the simulator to explore whether small and medium gravitational systems:
 
-- stable configurations
-- bounded chaotic configurations
-- repeated collision systems
-- redistribution of energy and momentum
-- body ejection
-- spatial divergence
+- remain stable,
+- remain bounded but become chaotic,
+- repeatedly collide and ricochet,
+- redistribute energy and momentum,
+- eject bodies,
+- or diverge spatially.
 
-## Strong candidate for the next feature
+## Strong next feature
 
-Add a quantitative system-size diagnostic based on center of mass:
+Add a quantitative system-size / boundedness diagnostic. For Huge/Box this can be based on center of mass, for example:
 
 `Rmax(t) = max_i |r_i - R_COM|`
 
-Also record the historical maximum.
-
-This would provide an objective bounded/diverging measurement in addition to visual trail inspection.
+For Toroid, use a periodic-geometry equivalent rather than a naive Cartesian COM distance.
 
 ## Other useful next steps
 
-- Angular momentum vector and magnitude.
-- Interactive 3-D plot.
-- Escape detection and escape-event logging.
+- Angular momentum diagnostics.
+- Interactive 3-D view for Huge/Box.
+- Escape/event logging.
 - Configuration save/load.
-- Export diagnostics to CSV.
-- Export final positions/velocities.
-- Leapfrog / velocity-Verlet option and energy-conservation comparison.
+- CSV diagnostics export.
+- Final-state export.
+- Leapfrog / velocity-Verlet option.
 - Initial-condition presets.
-- A reproducible experiment ID built from configuration + random seed.
-- Dynamic hide/show/clear of the permanent trail while a simulation is already running.
+- Dynamic hide/show/clear of the permanent trail during a running simulation.
 
 ## Repository
 
 `https://github.com/leodman/gravity`
 
-Main executable:
+Current app:
 
-`planetary_sim.py`
-
-Documentation:
-
-- `README.md`
-- `PROJECT_STATUS.md`
-
-Dependencies:
-
-`requirements.txt`
+- `run_gravity.py` — recommended launcher.
+- `gravity_app.py` — current UI and Toroid implementation.
+- `planetary_sim.py` — base physics/UI implementation reused by the current app.
+- `README.md` — user documentation.
+- `requirements.txt` — dependencies.
