@@ -45,6 +45,7 @@ def initialize_system(n_s, n_o, mass_vector_text, heavy_mass, ordinary_mass,
     n = n_s + n_o
     if n < 1:
         raise ValueError("At least one body is required")
+
     names = [f"S{i}" for i in range(n_s)] + [f"O{i}" for i in range(n_o)]
     rng = np.random.default_rng(int(seed))
 
@@ -154,7 +155,7 @@ def earliest_collision_time(pos, vel, radius, max_dt):
                 if disc < 0:
                     continue
                 root = math.sqrt(disc)
-                candidates = [t for t in ((-b-root)/(2*a), (-b+root)/(2*a)) if -1e-12 <= t <= max_dt + 1e-12]
+                candidates = [t for t in ((-b - root)/(2*a), (-b + root)/(2*a)) if -1e-12 <= t <= max_dt + 1e-12]
                 if not candidates:
                     continue
                 t = max(0.0, min(candidates))
@@ -201,14 +202,72 @@ def reflect_box(pos, vel, half_size, radius):
 
 
 def physics_step(pos, vel, mass, radius, G, softening, dt, boundary_mode, box_half_size, internal_substeps):
-    h = float(dt) / max(1, int(internal_substeps))
+    substeps = max(1, int(internal_substeps))
+    h = float(dt) / substeps
     collisions = 0
-    for _ in range(max(1, int(internal_substeps))):
+    for _ in range(substeps):
         vel += gravitational_accelerations(pos, mass, G, softening) * h
         collisions += drift_with_exact_collisions(pos, vel, mass, radius, h)
         if boundary_mode == "Box":
             reflect_box(pos, vel, box_half_size, radius)
     return collisions
+
+
+class RasterTrail:
+    """Fixed-memory XY trail buffer. Memory use does not grow with runtime."""
+    def __init__(self, resolution, limit):
+        self.resolution = max(200, int(resolution))
+        self.limit = float(limit)
+        self.buffer = np.zeros((self.resolution, self.resolution), dtype=np.uint16)
+        self.previous_pixels = None
+
+    def _xy_to_pixel(self, xy):
+        scale = (self.resolution - 1) / (2.0 * self.limit)
+        px = np.rint((xy[:, 0] + self.limit) * scale).astype(int)
+        py = np.rint((xy[:, 1] + self.limit) * scale).astype(int)
+        valid = ((px >= 0) & (px < self.resolution) & (py >= 0) & (py < self.resolution))
+        return px, py, valid
+
+    def _paint_line(self, x0, y0, x1, y1):
+        steps = max(abs(x1-x0), abs(y1-y0), 1)
+        xs = np.rint(np.linspace(x0, x1, steps + 1)).astype(int)
+        ys = np.rint(np.linspace(y0, y1, steps + 1)).astype(int)
+        valid = ((xs >= 0) & (xs < self.resolution) & (ys >= 0) & (ys < self.resolution))
+        xs, ys = xs[valid], ys[valid]
+        vals = self.buffer[ys, xs].astype(np.uint32) + 1
+        self.buffer[ys, xs] = np.minimum(vals, 65535).astype(np.uint16)
+
+    def paint(self, positions):
+        px, py, valid = self._xy_to_pixel(positions[:, :2])
+        current = [(int(px[i]), int(py[i])) if valid[i] else None for i in range(len(px))]
+        if self.previous_pixels is None:
+            self.previous_pixels = current
+            return
+        for prev, cur in zip(self.previous_pixels, current):
+            if prev is not None and cur is not None:
+                self._paint_line(prev[0], prev[1], cur[0], cur[1])
+        self.previous_pixels = current
+
+    def image_trace(self, opacity):
+        if not np.any(self.buffer):
+            return None
+        z = np.log1p(self.buffer.astype(float))
+        z /= max(float(np.max(z)), 1e-15)
+        return go.Heatmap(
+            z=z,
+            x=np.linspace(-self.limit, self.limit, self.resolution),
+            y=np.linspace(-self.limit, self.limit, self.resolution),
+            zmin=0, zmax=1, showscale=False, hoverinfo="skip",
+            opacity=max(0.0, min(1.0, float(opacity))),
+            colorscale=[[0.0, "rgba(0,0,0,0)"], [1.0, "rgba(120,120,120,1)"]],
+        )
+
+
+def make_fading_trails(names, pos, fading_points):
+    trails = [deque(maxlen=max(2, int(fading_points))) for _ in names]
+    for i in range(len(names)):
+        trails[i].append(pos[i].copy())
+    return trails
 
 
 def marker_sizes(radius, mass):
@@ -220,28 +279,20 @@ def marker_sizes(radius, mass):
     return 8.0 + 18.0 * (lm-lm.min()) / (lm.max()-lm.min())
 
 
-def make_trails(names, pos, mode, fading_points, permanent_cap):
-    if mode == "None":
-        return None
-    if mode == "Fading":
-        trails = [deque(maxlen=max(2, int(fading_points))) for _ in names]
-    else:
-        cap = max(0, int(permanent_cap))
-        trails = [([] if cap == 0 else deque(maxlen=cap)) for _ in names]
-    for i in range(len(names)):
-        trails[i].append(pos[i].copy())
-    return trails
-
-
-def live_figure(pos, trails, names, mass, radius, n_s, limit, boundary_mode, box_half_size, sim_time, trail_mode):
+def live_figure(pos, fading_trails, raster_trail, names, mass, radius, n_s, limit,
+                boundary_mode, box_half_size, sim_time, trail_mode,
+                permanent_visible, permanent_opacity):
     fig = go.Figure()
-    if trails is not None:
+    if trail_mode == "Permanent" and permanent_visible and raster_trail is not None:
+        raster = raster_trail.image_trace(permanent_opacity)
+        if raster is not None:
+            fig.add_trace(raster)
+    if trail_mode == "Fading" and fading_trails is not None:
         for i, name in enumerate(names):
-            if len(trails[i]) > 1:
-                arr = np.asarray(trails[i])
-                fig.add_trace(go.Scatter(x=arr[:,0], y=arr[:,1], mode="lines",
-                    line=dict(width=1), name=f"{name} trail", showlegend=False,
-                    hoverinfo="skip", opacity=0.45 if trail_mode == "Fading" else 0.75))
+            if len(fading_trails[i]) > 1:
+                arr = np.asarray(fading_trails[i])
+                fig.add_trace(go.Scatter(x=arr[:,0], y=arr[:,1], mode="lines", line=dict(width=1),
+                    showlegend=False, hoverinfo="skip", opacity=0.45))
     groups = np.array(["S" if i < n_s else "O" for i in range(len(names))], dtype=object)
     custom = np.column_stack([mass, radius, groups, pos[:,2]])
     fig.add_trace(go.Scatter(x=pos[:,0], y=pos[:,1], mode="markers+text", text=names,
@@ -289,7 +340,8 @@ def live_simulation(n_s,n_o,run_mode,step_limit,sim_duration,real_hours,dt,inter
                     calculations_per_frame,frame_delay,G,heavy_mass,ordinary_mass,mass_vector_text,
                     default_s_radius,default_o_radius,radius_vector_text,init_extent,velocity_mode,
                     random_speed,position_rows_text,velocity_rows_text,softening,boundary_mode,
-                    box_half_size,view_half_size,auto_view,trail_mode,trail_points,permanent_trail_cap,
+                    box_half_size,view_half_size,auto_view,trail_mode,fading_trail_points,
+                    permanent_visible,permanent_opacity,permanent_decimation,permanent_resolution,
                     diagnostic_points,seed):
     try:
         dt=float(dt); G=float(G)
@@ -297,45 +349,54 @@ def live_simulation(n_s,n_o,run_mode,step_limit,sim_duration,real_hours,dt,inter
         internal_substeps=max(1,int(internal_substeps)); calculations_per_frame=max(1,int(calculations_per_frame))
         step_limit=max(1,int(step_limit)); sim_duration=max(0,float(sim_duration)); real_hours=max(0,float(real_hours))
         frame_delay=max(0,float(frame_delay)); diagnostic_points=max(10,int(diagnostic_points))
+        permanent_decimation=max(1,int(permanent_decimation)); permanent_resolution=max(200,int(permanent_resolution))
         names,mass,radius,pos,vel=initialize_system(n_s,n_o,mass_vector_text,heavy_mass,ordinary_mass,
             default_s_radius,default_o_radius,radius_vector_text,init_extent,velocity_mode,random_speed,
             position_rows_text,velocity_rows_text,seed)
         if boundary_mode=="Box" and np.any(radius>=float(box_half_size)):
             raise ValueError("Every body radius must be smaller than box half-size")
         limit=max(float(box_half_size) if boundary_mode=="Box" else float(view_half_size),float(init_extent),1.0) if auto_view else max(float(view_half_size),1e-9)
-        trails=make_trails(names,pos,trail_mode,trail_points,permanent_trail_cap)
+        fading_trails=None; raster_trail=None
+        if trail_mode=="Fading": fading_trails=make_fading_trails(names,pos,fading_trail_points)
+        elif trail_mode=="Permanent":
+            raster_trail=RasterTrail(permanent_resolution,limit); raster_trail.paint(pos)
         history=deque(maxlen=diagnostic_points)
         initial_state=pd.DataFrame({"name":names,"mass":mass,"radius":radius,"x":pos[:,0],"y":pos[:,1],"z":pos[:,2],"vx":vel[:,0],"vy":vel[:,1],"vz":vel[:,2]})
-        step=0; sim_time=0.0; wall_start=time.monotonic(); collision_count=0
+        step=0; sim_time=0.0; wall_start=time.monotonic(); collision_count=0; visible_frame=0
         ke,pe,te,p,com=diagnostics(pos,vel,mass,G,float(softening)); e0=te
         def append_history():
-            ke_,pe_,te_,p_,com_=diagnostics(pos,vel,mass,G,float(softening))
-            history.append({"step":step,"time":sim_time,"K":ke_,"U":pe_,"E":te_,"Erel":(te_-e0)/max(abs(e0),1e-15),
-                "Px":p_[0],"Py":p_[1],"Pz":p_[2],"Pmag":float(np.linalg.norm(p_)),"COM_x":com_[0],"COM_y":com_[1],"COM_z":com_[2],"collisions":collision_count})
+            ke_,pe_,te_,p_,com_=diagnostics(pos,vel,mass,G,float(softening)); erel=(te_-e0)/max(abs(e0),1e-15)
+            history.append({"step":step,"time":sim_time,"K":ke_,"U":pe_,"E":te_,"Erel":erel,"Px":p_[0],"Py":p_[1],"Pz":p_[2],"Pmag":float(np.linalg.norm(p_)),"COM_x":com_[0],"COM_y":com_[1],"COM_z":com_[2],"collisions":collision_count})
             return ke_,pe_,te_,p_
         append_history()
-        status=f"RUNNING | t=0 | K₀={ke:.8g} | U₀={pe:.8g} | E₀={te:.8g} | trail={trail_mode}"
-        yield live_figure(pos,trails,names,mass,radius,int(n_s),limit,boundary_mode,box_half_size,sim_time,trail_mode),energy_figure(history,e0),energy_error_figure(history),momentum_figure(history),pd.DataFrame(history),initial_state,status
+        def outputs(status):
+            return (live_figure(pos,fading_trails,raster_trail,names,mass,radius,int(n_s),limit,boundary_mode,box_half_size,sim_time,trail_mode,permanent_visible,permanent_opacity),energy_figure(history,e0),energy_error_figure(history),momentum_figure(history),pd.DataFrame(history),initial_state,status)
+        yield outputs(f"RUNNING | t=0 | K₀={ke:.8g} | U₀={pe:.8g} | E₀={te:.8g}")
         while True:
             elapsed=time.monotonic()-wall_start
             if run_mode=="Fixed steps" and step>=step_limit: break
             if run_mode=="Simulated duration" and sim_time>=sim_duration: break
-            if run_mode=="Real-time hours" and elapsed>=real_hours*3600: break
+            if run_mode=="Real-time hours" and elapsed>=real_hours*3600.0: break
             batch=calculations_per_frame
             if run_mode=="Fixed steps": batch=min(batch,step_limit-step)
             elif run_mode=="Simulated duration": batch=min(batch,max(1,int(math.ceil(max(0,sim_duration-sim_time)/dt))))
             for _ in range(batch):
-                collision_count+=physics_step(pos,vel,mass,radius,G,float(softening),dt,boundary_mode,float(box_half_size),internal_substeps)
+                collision_count += physics_step(pos,vel,mass,radius,G,float(softening),dt,boundary_mode,float(box_half_size),internal_substeps)
                 step+=1; sim_time+=dt
-            if trails is not None:
-                for i in range(len(names)): trails[i].append(pos[i].copy())
+            visible_frame += 1
+            if trail_mode=="Fading":
+                for i in range(len(names)): fading_trails[i].append(pos[i].copy())
+            elif trail_mode=="Permanent" and visible_frame % permanent_decimation == 0:
+                raster_trail.paint(pos)
             ke,pe,te,p=append_history(); drift=(te-e0)/max(abs(e0),1e-15); elapsed=time.monotonic()-wall_start
-            trail_count=0 if trails is None else len(trails[0])
-            status=f"RUNNING | step={step:,} | t={sim_time:.6g} | wall={elapsed:.1f}s | E={te:.8g} | ΔE/E₀={drift:+.3e} | |P|={np.linalg.norm(p):.6g} | collisions={collision_count} | trail={trail_mode} ({trail_count:,} pts/body)"
-            yield live_figure(pos,trails,names,mass,radius,int(n_s),limit,boundary_mode,box_half_size,sim_time,trail_mode),energy_figure(history,e0),energy_error_figure(history),momentum_figure(history),pd.DataFrame(history),initial_state,status
+            trail_note=""
+            if trail_mode=="Permanent":
+                trail_note=f" | raster={raster_trail.resolution}² ({raster_trail.buffer.nbytes/(1024*1024):.1f} MiB), every {permanent_decimation} frame(s)"
+            status=f"RUNNING | step={step:,} | t={sim_time:.6g} | wall={elapsed:.1f}s | K={ke:.8g} | U={pe:.8g} | E={te:.8g} | ΔE/E₀={drift:+.3e} | |P|={np.linalg.norm(p):.6g} | collisions={collision_count}{trail_note}"
+            yield outputs(status)
             if frame_delay>0: time.sleep(frame_delay)
-        status=f"FINISHED | step={step:,} | t={sim_time:.6g} | collisions={collision_count} | trail={trail_mode}"
-        yield live_figure(pos,trails,names,mass,radius,int(n_s),limit,boundary_mode,box_half_size,sim_time,trail_mode),energy_figure(history,e0),energy_error_figure(history),momentum_figure(history),pd.DataFrame(history),initial_state,status
+        elapsed=time.monotonic()-wall_start; drift=(te-e0)/max(abs(e0),1e-15)
+        yield outputs(f"FINISHED | step={step:,} | t={sim_time:.6g} | wall={elapsed:.1f}s | ΔE/E₀={drift:+.3e} | collisions={collision_count}")
     except Exception as exc:
         empty=go.Figure(); yield empty,empty,empty,empty,pd.DataFrame(),pd.DataFrame(),f"ERROR: {exc}"
 
@@ -343,14 +404,13 @@ def live_simulation(n_s,n_o,run_mode,step_limit,sim_duration,real_hours,dt,inter
 DESCRIPTION="""
 # Gravity — Live Planetary / N-body Simulator
 
-Newtonian gravity with rigid spherical bodies and perfectly elastic frictionless collisions.
-
 Trail modes:
-- **Fading** (default): rolling trail; old path points disappear.
-- **Permanent**: retains the complete displayed trajectory. Set Permanent trail cap to 0 for unlimited.
-- **None**: no trajectory is drawn or stored.
+- **Fading** — rolling coordinate trail (default/current behavior).
+- **Permanent** — fixed-memory raster background layer. It accumulates paths without retaining all old coordinates.
+- **None** — no trail.
 
-Permanent trails record one point per screen refresh, not one point per internal physics substep. This keeps long stability/chaos runs practical while preserving the visible trajectory.
+Permanent trail recording is independent of visibility. You can hide the layer while it keeps accumulating.
+Resolution and recording decimation are selectable, so long runs do not cause unbounded memory growth.
 """
 
 with gr.Blocks(title="Gravity — Live Planetary Simulation") as demo:
@@ -358,37 +418,51 @@ with gr.Blocks(title="Gravity — Live Planetary Simulation") as demo:
     with gr.Row():
         with gr.Column():
             gr.Markdown("## Objects")
-            n_s=gr.Number(value=1,precision=0,label="Number of S bodies"); n_o=gr.Number(value=1,precision=0,label="Number of O bodies")
-            heavy_mass=gr.Number(value=1000.0,label="Default S mass"); ordinary_mass=gr.Number(value=1.0,label="Default O mass")
+            n_s=gr.Number(value=1,precision=0,label="Number of S bodies")
+            n_o=gr.Number(value=1,precision=0,label="Number of O bodies")
+            heavy_mass=gr.Number(value=1000.0,label="Default S mass")
+            ordinary_mass=gr.Number(value=1.0,label="Default O mass")
             mass_vector=gr.Textbox(label="Optional mass vector",placeholder="1000, 500, 1")
             gr.Markdown("## Physical radii")
-            default_s_radius=gr.Number(value=0.5,label="Default S radius"); default_o_radius=gr.Number(value=0.1,label="Default O radius")
+            default_s_radius=gr.Number(value=0.5,label="Default S radius")
+            default_o_radius=gr.Number(value=0.1,label="Default O radius")
             radius_vector=gr.Textbox(label="Optional radius vector",placeholder="0.5, 0.4, 0.1")
             gr.Markdown("## Initial state")
             init_extent=gr.Number(value=10.0,label="Random position half-extent")
             velocity_mode=gr.Radio(["Zero","Random"],value="Zero",label="Generated initial velocities")
-            random_speed=gr.Number(value=0.2,label="Maximum random speed magnitude"); seed=gr.Number(value=1,precision=0,label="Random seed")
+            random_speed=gr.Number(value=0.2,label="Maximum random speed magnitude")
+            seed=gr.Number(value=1,precision=0,label="Random seed")
             position_rows=gr.Textbox(label="Optional manual positions: x,y,z per body",placeholder="0,0,0\n7,0,0",lines=5)
             velocity_rows=gr.Textbox(label="Optional manual velocities: vx,vy,vz per body",placeholder="0,0,0\n0,0,0",lines=5)
         with gr.Column():
             gr.Markdown("## Run control")
             run_mode=gr.Radio(["Continuous","Fixed steps","Simulated duration","Real-time hours"],value="Continuous",label="Run mode")
-            step_limit=gr.Number(value=100000,precision=0,label="Steps (Fixed steps mode)"); sim_duration=gr.Number(value=100.0,label="Simulated time")
+            step_limit=gr.Number(value=100000,precision=0,label="Steps")
+            sim_duration=gr.Number(value=100.0,label="Simulated time")
             real_hours=gr.Number(value=1.0,label="Real hours to run")
             gr.Markdown("## Physics / live refresh")
-            G=gr.Number(value=1.0,label="Gravitational constant G"); dt=gr.Number(value=0.001,label="Physics Δt (outer step)")
+            G=gr.Number(value=1.0,label="Gravitational constant G")
+            dt=gr.Number(value=0.001,label="Physics Δt (outer step)")
             internal_substeps=gr.Number(value=100,precision=0,label="Internal physics substeps per Δt")
-            calculations_per_frame=gr.Number(value=20,precision=0,label="Physics steps per screen refresh"); frame_delay=gr.Number(value=0.03,label="Refresh delay (seconds)")
+            calculations_per_frame=gr.Number(value=20,precision=0,label="Physics steps per screen refresh")
+            frame_delay=gr.Number(value=0.03,label="Delay between screen refreshes (seconds)")
             softening=gr.Number(value=1e-6,label="Gravity softening ε")
-            gr.Markdown("## Boundary / view / trails")
-            boundary_mode=gr.Radio(["Huge","Box"],value="Huge",label="Boundary mode"); box_half_size=gr.Number(value=12.0,label="Box half-size")
-            view_half_size=gr.Number(value=12.0,label="Visible XY half-size"); auto_view=gr.Checkbox(value=True,label="Automatic initial view size")
+            gr.Markdown("## Boundary / view")
+            boundary_mode=gr.Radio(["Huge","Box"],value="Huge",label="Boundary mode")
+            box_half_size=gr.Number(value=12.0,label="Box half-size")
+            view_half_size=gr.Number(value=12.0,label="Visible XY half-size")
+            auto_view=gr.Checkbox(value=True,label="Automatic initial view size")
+            gr.Markdown("## Trails")
             trail_mode=gr.Radio(["Fading","Permanent","None"],value="Fading",label="Trail mode")
-            trail_points=gr.Number(value=150,precision=0,label="Fading trail points per object")
-            permanent_trail_cap=gr.Number(value=0,precision=0,label="Permanent trail cap per object (0 = unlimited)")
+            fading_trail_points=gr.Number(value=150,precision=0,label="Fading trail points per object")
+            permanent_visible=gr.Checkbox(value=True,label="Permanent trail visible")
+            permanent_opacity=gr.Slider(0.0,1.0,value=0.45,step=0.05,label="Permanent trail opacity")
+            permanent_decimation=gr.Number(value=5,precision=0,label="Permanent trail: record every N screen refreshes")
+            permanent_resolution=gr.Number(value=1000,precision=0,label="Permanent raster resolution (pixels per side)")
             diagnostic_points=gr.Number(value=500,precision=0,label="Diagnostic history points kept")
     with gr.Row():
-        start_btn=gr.Button("▶ Start / Restart",variant="primary"); stop_btn=gr.Button("■ Stop",variant="stop")
+        start_btn=gr.Button("▶ Start / Restart",variant="primary")
+        stop_btn=gr.Button("■ Stop",variant="stop")
     status=gr.Textbox(label="Simulation status",interactive=False)
     with gr.Tab("Live simulation"): sim_plot=gr.Plot()
     with gr.Tab("Energy"): energy_plot=gr.Plot()
@@ -396,12 +470,10 @@ with gr.Blocks(title="Gravity — Live Planetary Simulation") as demo:
     with gr.Tab("Momentum"): momentum_plot=gr.Plot()
     with gr.Tab("Diagnostics"): diagnostics_table=gr.Dataframe(interactive=False)
     with gr.Tab("Initial state"): state_table=gr.Dataframe(interactive=False)
-    inputs=[n_s,n_o,run_mode,step_limit,sim_duration,real_hours,dt,internal_substeps,calculations_per_frame,frame_delay,G,
-        heavy_mass,ordinary_mass,mass_vector,default_s_radius,default_o_radius,radius_vector,init_extent,velocity_mode,random_speed,
-        position_rows,velocity_rows,softening,boundary_mode,box_half_size,view_half_size,auto_view,trail_mode,trail_points,permanent_trail_cap,diagnostic_points,seed]
+    inputs=[n_s,n_o,run_mode,step_limit,sim_duration,real_hours,dt,internal_substeps,calculations_per_frame,frame_delay,G,heavy_mass,ordinary_mass,mass_vector,default_s_radius,default_o_radius,radius_vector,init_extent,velocity_mode,random_speed,position_rows,velocity_rows,softening,boundary_mode,box_half_size,view_half_size,auto_view,trail_mode,fading_trail_points,permanent_visible,permanent_opacity,permanent_decimation,permanent_resolution,diagnostic_points,seed]
     outputs=[sim_plot,energy_plot,energy_error_plot,momentum_plot,diagnostics_table,state_table,status]
     run_event=start_btn.click(fn=live_simulation,inputs=inputs,outputs=outputs,concurrency_limit=1,show_progress="hidden")
     stop_btn.click(fn=None,inputs=None,outputs=None,cancels=[run_event],queue=False)
 
-if __name__=="__main__":
+if __name__ == "__main__":
     demo.queue().launch(share=True)
