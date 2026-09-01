@@ -235,15 +235,51 @@ For long experiments, a local Conda machine is often preferable to a temporary C
 
 After pulling code updates locally, stop the old `run_gravity.py` process and launch it again. A running Gradio process does not automatically reload the new Python source.
 
-## Jupyter
+## Jupyter Notebook
 
-From the repository directory after installing dependencies:
+In a Jupyter **code cell**, shell commands must start with `!`, and directory changes should use `%cd`.
 
-```python
-%run run_gravity.py
+Do **not** paste Markdown-formatted links such as:
+
+```text
+git clone [https://github.com/leodman/gravity.git](https://github.com/leodman/gravity.git)
 ```
 
-If a previous notebook cell is still running the server, interrupt that kernel execution before launching the updated version.
+That is Markdown, not executable Python or shell syntax, and it will produce a `SyntaxError` in a code cell.
+
+### Fresh clone from Jupyter
+
+Run these cells:
+
+```python
+!git clone https://github.com/leodman/gravity.git
+```
+
+```python
+%cd gravity
+```
+
+```python
+!pip install -r requirements.txt
+```
+
+```python
+!python run_gravity.py
+```
+
+### Existing local clone
+
+If the repository already exists, move to its directory and update it:
+
+```python
+%cd /path/to/gravity
+!git pull
+!python run_gravity.py
+```
+
+Replace `/path/to/gravity` with the actual local repository path.
+
+If a previous notebook cell is still running the Gradio server, interrupt that cell/kernel execution before launching the updated version. After restarting, use the **new** Gradio URL or local address produced by the new process.
 
 ## Current research goal
 
